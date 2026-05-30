@@ -286,12 +286,18 @@ class MattermostAdapter(BasePlatformAdapter):
                 "channel_id": chat_id,
                 "message": chunk,
             }
-            # Thread support: reply_to is the root post ID.
-            if reply_to and self._reply_mode == "thread":
-                # Ensure root_id points to the thread root, not a reply.
-                # Mattermost rejects non-root post IDs as root_id.
-                resolved_root = await self._resolve_root_id(reply_to)
-                payload["root_id"] = resolved_root
+            # Thread support: route into the thread root.
+            if self._reply_mode == "thread":
+                # Prefer the already-resolved thread root passed via metadata
+                # (gateway delivery sets metadata["thread_id"] for progress /
+                # status / proactive sends that carry no reply_to). Mattermost
+                # rejects non-root post IDs as root_id, so fall back to
+                # resolving reply_to to its thread root for direct replies.
+                thread_root = (metadata or {}).get("thread_id")
+                if thread_root:
+                    payload["root_id"] = thread_root
+                elif reply_to:
+                    payload["root_id"] = await self._resolve_root_id(reply_to)
 
             data = await self._api_post("posts", payload)
             if not data or "id" not in data:
@@ -786,8 +792,15 @@ class MattermostAdapter(BasePlatformAdapter):
         sender_id = post.get("user_id", "")
         sender_name = data.get("sender_name", "").lstrip("@") or sender_id
 
-        # Thread support: if the post is in a thread, use root_id.
+        # Thread support: if the post is in a thread, use its root_id. For a
+        # non-DM top-level post, root_id is empty — key the session by the
+        # post's own id so each channel conversation gets its own session
+        # (otherwise all root posts collapse into one channel-wide session and
+        # block parallel conversations) and outbound thread routing has an
+        # anchor for progress/status sends.
         thread_id = post.get("root_id") or None
+        if thread_id is None and chat_type != "dm":
+            thread_id = post_id
 
         # Determine message type.
         file_ids = post.get("file_ids") or []
