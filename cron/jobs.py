@@ -153,6 +153,10 @@ def _normalize_job_record(job: Dict[str, Any]) -> Dict[str, Any]:
     profile = _coerce_job_text(normalized.get("profile")).strip()
     normalized["profile"] = profile or None
 
+    # Legacy jobs (created before opt-in cron memory) lack this field; default
+    # to False so they keep running memory-isolated.
+    normalized["use_memory"] = bool(normalized.get("use_memory", False))
+
     return normalized
 
 
@@ -546,6 +550,7 @@ def create_job(
     workdir: Optional[str] = None,
     profile: Optional[str] = None,
     no_agent: bool = False,
+    use_memory: bool = False,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -595,6 +600,11 @@ def create_job(
                 and deliver its stdout directly. Empty stdout = silent (no
                 delivery). Requires ``script`` to be set. Ideal for classic
                 watchdogs and periodic alerts that don't need LLM reasoning.
+        use_memory: When True, the cron run participates in the profile's
+                external memory (Honcho): it recalls prior context and writes
+                the run back. Writes are scoped to a dedicated ``<identity>-cron``
+                peer so the human user representation is never observed. Default
+                False preserves the memory-isolated cron behaviour.
 
     Returns:
         The created job dict
@@ -630,6 +640,7 @@ def create_job(
     normalized_workdir = _normalize_workdir(workdir)
     normalized_profile = _normalize_profile(profile)
     normalized_no_agent = bool(no_agent)
+    normalized_use_memory = bool(use_memory)
 
     # no_agent jobs are meaningless without a script — the script IS the job.
     # Surface this as a clear ValueError at create time so bad configs never
@@ -661,6 +672,7 @@ def create_job(
         "base_url": normalized_base_url,
         "script": normalized_script,
         "no_agent": normalized_no_agent,
+        "use_memory": normalized_use_memory,
         "context_from": context_from,
         "schedule": parsed_schedule,
         "schedule_display": parsed_schedule.get("display", schedule),

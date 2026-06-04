@@ -1459,6 +1459,8 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
             job_id, _job_workdir,
         )
         _job_workdir = None
+    # Opt-in external-memory participation for this cron run (default off).
+    _job_use_memory = bool(job.get("use_memory"))
     _prior_terminal_cwd = os.environ.get("TERMINAL_CWD", "_UNSET_")
     if _job_workdir:
         os.environ["TERMINAL_CWD"] = _job_workdir
@@ -1649,7 +1651,12 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
             # Without a workdir, keep cwd context discovery disabled.
             skip_context_files=not bool(_job_workdir),
             load_soul_identity=True,
-            skip_memory=True,  # Cron system prompts would corrupt user representations
+            # By default cron runs are memory-isolated: a cron system prompt
+            # observed against the human user peer would corrupt their Honcho
+            # representation. Opt-in `use_memory` flips this on, with writes
+            # scoped to a dedicated `<identity>-cron` peer (see cron_memory).
+            skip_memory=not _job_use_memory,
+            cron_memory=_job_use_memory,
             platform="cron",
             session_id=_cron_session_id,
             session_db=_session_db,
