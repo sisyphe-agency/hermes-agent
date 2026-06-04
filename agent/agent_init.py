@@ -193,6 +193,7 @@ def init_agent(
     skip_context_files: bool = False,
     load_soul_identity: bool = False,
     skip_memory: bool = False,
+    cron_memory: bool = False,
     session_db=None,
     parent_session_id: str = None,
     iteration_budget: "IterationBudget" = None,
@@ -1144,6 +1145,11 @@ def init_agent(
                         _init_kwargs["agent_workspace"] = "hermes"
                     except Exception:
                         pass
+                    # Opt-in cron memory: tells the provider to bypass its own
+                    # cron guard and scope writes to a dedicated cron peer
+                    # instead of the human user peer.
+                    if cron_memory:
+                        _init_kwargs["cron_memory"] = True
                     agent._memory_manager.initialize_all(**_init_kwargs)
                     _ra().logger.info("Memory provider '%s' activated", _mem_provider_name)
                 else:

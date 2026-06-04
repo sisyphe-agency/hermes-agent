@@ -188,6 +188,21 @@ ALL_TOOL_SCHEMAS = [PROFILE_SCHEMA, SEARCH_SCHEMA, REASONING_SCHEMA, CONTEXT_SCH
 # MemoryProvider implementation
 # ---------------------------------------------------------------------------
 
+def _cron_peer_name(identity: str) -> str:
+    """Dedicated Honcho peer for opt-in cron memory writes: ``<identity>-cron``.
+
+    Cron runs that opt into memory scope their writes to this peer instead of
+    the human user peer, so a scheduled persona/system-prompt is never observed
+    against the user — honoring the original ``skip_memory`` guard's intent
+    while still letting the agent accumulate and recall its own cron context.
+
+    Sanitized to Honcho's peer-id pattern ``^[a-zA-Z0-9_-]+$``. Falls back to a
+    bare ``"cron"`` peer when no identity is available, never an empty id.
+    """
+    base = re.sub(r"[^a-zA-Z0-9_-]", "-", (identity or "").strip()).strip("-")
+    return f"{base}-cron" if base else "cron"
+
+
 class HonchoMemoryProvider(MemoryProvider):
     """Honcho AI-native memory with dialectic Q&A and persistent user modeling."""
 
@@ -231,6 +246,9 @@ class HonchoMemoryProvider(MemoryProvider):
 
         # Port #4053: cron guard — when True, plugin is fully inactive
         self._cron_skipped = False
+        # Opt-in cron memory — when True, writes are scoped to a cron peer
+        # instead of the human user peer (set during initialize()).
+        self._cron_memory = False
 
     @property
     def name(self) -> str:
@@ -281,9 +299,16 @@ class HonchoMemoryProvider(MemoryProvider):
         """
         try:
             # ----- Port #4053: cron guard -----
+            # Cron/flush runs are memory-isolated by default so a scheduled
+            # system-prompt never corrupts the human user representation. An
+            # opt-in cron job (cron_memory=True) yields past this guard; its
+            # writes are scoped to a dedicated cron peer in _do_session_init.
             agent_context = kwargs.get("agent_context", "")
             platform = kwargs.get("platform", "cli")
-            if agent_context in {"cron", "flush"} or platform == "cron":
+            self._cron_memory = bool(kwargs.get("cron_memory", False))
+            if not self._cron_memory and (
+                agent_context in {"cron", "flush"} or platform == "cron"
+            ):
                 logger.debug("Honcho skipped: cron/flush context (agent_context=%s, platform=%s)",
                              agent_context, platform)
                 self._cron_skipped = True
@@ -353,12 +378,21 @@ class HonchoMemoryProvider(MemoryProvider):
         from plugins.memory.honcho.session import HonchoSessionManager
 
         client = get_honcho_client(cfg)
+        # Opt-in cron memory scopes the user-side peer to a dedicated
+        # ``<identity>-cron`` peer so the human user representation is never
+        # observed. Cron runs have no human identity, so there is no alt peer.
+        if kwargs.get("cron_memory"):
+            runtime_user_peer = _cron_peer_name(kwargs.get("agent_identity") or "")
+            runtime_user_peer_alt = None
+        else:
+            runtime_user_peer = kwargs.get("user_id") or None
+            runtime_user_peer_alt = kwargs.get("user_id_alt") or None
         self._manager = HonchoSessionManager(
             honcho=client,
             config=cfg,
             context_tokens=cfg.context_tokens,
-            runtime_user_peer_name=kwargs.get("user_id") or None,
-            runtime_user_peer_name_alt=kwargs.get("user_id_alt") or None,
+            runtime_user_peer_name=runtime_user_peer,
+            runtime_user_peer_name_alt=runtime_user_peer_alt,
         )
 
         # ----- B3: resolve_session_name -----
