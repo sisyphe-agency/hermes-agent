@@ -888,6 +888,11 @@ def _build_child_agent(
     # 'leaf' (default) cannot; 'orchestrator' retains the delegation
     # toolset subject to depth/kill-switch bounds applied below.
     role: str = "leaf",
+    # Optional stable role name for this delegation. When set, the child runs
+    # memory-ON (skip_memory=False) and accumulates its OWN experience, scoped
+    # to a dedicated `<parent_identity>-<agent_name>` peer — never the human
+    # user peer. When None (default), the child stays memory-isolated.
+    agent_name: Optional[str] = None,
 ):
     """
     Build a child AIAgent on the main thread (thread-safe construction).
@@ -1103,6 +1108,29 @@ def _build_child_agent(
         # openrouter/pareto-code), so we keep it inherited even when the
         # provider is overridden — it's a no-op on any other model.
 
+    # ── Per-role memory ─────────────────────────────────────────────────
+    # Default: the child is memory-isolated (skip_memory=True) so an ephemeral
+    # delegation never writes into the parent/user peer. When the lead assigns
+    # a stable role name, the child instead runs memory-ON, scoped to its own
+    # `<parent_identity>-<agent_name>` peer, so that role accumulates its own
+    # experience without bleeding into the human user representation. Reuses
+    # the cron_memory peer-scoping path (writes go to an agent peer, not the
+    # user peer); memory_identity overrides the active-profile identity.
+    _clean_agent_name = str(agent_name or "").strip()
+    if _clean_agent_name:
+        try:
+            from hermes_cli.profiles import get_active_profile_name
+            _parent_identity = get_active_profile_name() or "hermes"
+        except Exception:
+            _parent_identity = "hermes"
+        _child_skip_memory = False
+        _child_cron_memory = True
+        _child_memory_identity = f"{_parent_identity}-{_clean_agent_name}"
+    else:
+        _child_skip_memory = True
+        _child_cron_memory = False
+        _child_memory_identity = None
+
     child = AIAgent(
         base_url=effective_base_url,
         api_key=effective_api_key,
@@ -1122,7 +1150,9 @@ def _build_child_agent(
         log_prefix=f"[subagent-{task_index}]",
         platform=parent_agent.platform,
         skip_context_files=True,
-        skip_memory=True,
+        skip_memory=_child_skip_memory,
+        cron_memory=_child_cron_memory,
+        memory_identity=_child_memory_identity,
         clarify_callback=None,
         thinking_callback=child_thinking_cb,
         session_db=getattr(parent_agent, "_session_db", None),
@@ -1924,6 +1954,7 @@ def delegate_task(
     acp_command: Optional[str] = None,
     acp_args: Optional[List[str]] = None,
     role: Optional[str] = None,
+    agent_name: Optional[str] = None,
     parent_agent=None,
 ) -> str:
     """
@@ -2017,7 +2048,8 @@ def delegate_task(
         task_list = tasks
     elif goal and isinstance(goal, str) and goal.strip():
         task_list = [
-            {"goal": goal, "context": context, "toolsets": toolsets, "role": top_role}
+            {"goal": goal, "context": context, "toolsets": toolsets, "role": top_role,
+             "agent_name": agent_name}
         ]
     else:
         return tool_error("Provide either 'goal' (single task) or 'tasks' (batch).")
@@ -2080,6 +2112,7 @@ def delegate_task(
                     else (acp_args if acp_args is not None else creds.get("args"))
                 ),
                 role=effective_role,
+                agent_name=t.get("agent_name"),
             )
             # Override with correct parent tool names (before child construction mutated global)
             child._delegate_saved_tool_names = _parent_tool_names
@@ -2736,6 +2769,10 @@ DELEGATE_TASK_SCHEMA = {
                             "enum": ["leaf", "orchestrator"],
                             "description": "Per-task role override. See top-level 'role' for semantics.",
                         },
+                        "agent_name": {
+                            "type": "string",
+                            "description": "Per-task agent name override. See top-level 'agent_name' for semantics.",
+                        },
                     },
                     "required": ["goal"],
                 },
@@ -2748,6 +2785,17 @@ DELEGATE_TASK_SCHEMA = {
                 "type": "string",
                 "enum": ["leaf", "orchestrator"],
                 "description": "(rebuilt at get_definitions() time)",
+            },
+            "agent_name": {
+                "type": "string",
+                "description": (
+                    "Optional stable role name for this delegation (e.g. 'collector', "
+                    "'analyst', 'verifier'). When set, the sub-agent runs WITH memory and "
+                    "accumulates its own experience across runs, scoped to a dedicated "
+                    "'<your-identity>-<agent_name>' memory peer — it never writes into the "
+                    "human user's memory. Leave unset for a one-off, memory-isolated sub-agent. "
+                    "Use a consistent name across runs so the role's experience builds up."
+                ),
             },
             "acp_command": {
                 "type": "string",
@@ -2793,6 +2841,7 @@ registry.register(
         acp_command=args.get("acp_command"),
         acp_args=args.get("acp_args"),
         role=args.get("role"),
+        agent_name=args.get("agent_name"),
         parent_agent=kw.get("parent_agent"),
     ),
     check_fn=check_delegate_requirements,

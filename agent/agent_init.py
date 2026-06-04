@@ -194,6 +194,7 @@ def init_agent(
     load_soul_identity: bool = False,
     skip_memory: bool = False,
     cron_memory: bool = False,
+    memory_identity: str = None,
     session_db=None,
     parent_session_id: str = None,
     iteration_budget: "IterationBudget" = None,
@@ -1145,6 +1146,11 @@ def init_agent(
                         _init_kwargs["agent_workspace"] = "hermes"
                     except Exception:
                         pass
+                    # Explicit memory identity override (e.g. a delegated
+                    # sub-agent scoping its memory to a stable per-role peer
+                    # `<parent>-<role>` rather than the active profile).
+                    if memory_identity:
+                        _init_kwargs["agent_identity"] = memory_identity
                     # Opt-in cron memory: tells the provider to bypass its own
                     # cron guard and scope writes to a dedicated cron peer
                     # instead of the human user peer.
