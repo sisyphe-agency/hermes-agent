@@ -413,17 +413,40 @@ class HonchoMemoryProvider(MemoryProvider):
         session = self._manager.get_or_create(self._session_key)
         self._session_initialized = True
 
-        # ----- B6: Memory file migration (one-time, for new sessions) -----
-        # Skip under per-session strategy: every Hermes run creates a fresh
-        # Honcho session by design, so uploading MEMORY.md/USER.md/SOUL.md to
-        # each one would flood the backend with short-lived duplicates instead
-        # of performing a one-time migration.
+        # ----- B6: Memory file migration (one-time per user peer) -----
+        # Non-per-session strategies (per-conversation / per-repo / global) and
+        # cron runs (session key is unique per run) create a brand-new empty
+        # Honcho session every conversation/run, so the bare ``not session.messages``
+        # check used to re-upload MEMORY.md/USER.md each time and flood the deriver
+        # with near-duplicate prior-memory observations. A persistent marker keyed
+        # on (user peer, file fingerprint) makes migration idempotent per peer.
+        # per-session still skips entirely: it relies on Honcho's automatic recall.
         try:
             if not session.messages and cfg.session_strategy != "per-session":
                 from hermes_constants import get_hermes_home
-                mem_dir = str(get_hermes_home() / "memories")
-                self._manager.migrate_memory_files(self._session_key, mem_dir)
-                logger.debug("Honcho memory file migration attempted for new session: %s", self._session_key)
+                from plugins.memory.honcho.migration_marker import (
+                    MARKER_FILENAME,
+                    memory_files_fingerprint,
+                    migration_needed,
+                    record_migration,
+                )
+
+                mem_dir = get_hermes_home() / "memories"
+                marker = mem_dir / MARKER_FILENAME
+                peer_id = session.user_peer_id
+                fingerprint = memory_files_fingerprint(mem_dir)
+                if migration_needed(marker, peer_id, fingerprint):
+                    if self._manager.migrate_memory_files(self._session_key, str(mem_dir)):
+                        record_migration(marker, peer_id, fingerprint)
+                        logger.debug(
+                            "Honcho memory file migration done for peer %s (session %s)",
+                            peer_id, self._session_key,
+                        )
+                else:
+                    logger.debug(
+                        "Honcho memory file migration skipped: already migrated for peer %s (session %s)",
+                        peer_id, self._session_key,
+                    )
             elif cfg.session_strategy == "per-session":
                 logger.debug(
                     "Honcho memory file migration skipped: per-session strategy creates a fresh session per run (%s)",
